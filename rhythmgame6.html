@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>6-Key MIDI Rhythm Game</title>
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.8.16"></script>
+    <script src="https://unpkg.com/@tonejs/midi"></script>
+    <style>
+        :root {
+            --lane-width: 60px;
+            --perfect-line: 80%;
+        }
+        body {
+            background-color: #111;
+            color: #fff;
+            margin: 0;
+            overflow: hidden;
+            font-family: sans-serif;
+            display: flex;
+            justify-content: center;
+        }
+        #game-container {
+            position: relative;
+            width: calc(var(--lane-width) * 6 + 20px);
+            height: 100vh;
+            background: #222;
+            border-left: 2px solid #444;
+            border-right: 2px solid #444;
+        }
+        .lane {
+            position: absolute;
+            top: 0;
+            width: var(--lane-width);
+            height: 100%;
+            border-right: 1px solid #333;
+            box-sizing: border-box;
+        }
+        .lane-label {
+            position: absolute;
+            bottom: 10px;
+            width: 100%;
+            text-align: center;
+            font-weight: bold;
+            color: #666;
+        }
+        #judgment-line {
+            position: absolute;
+            top: var(--perfect-line);
+            width: 100%;
+            height: 4px;
+            background: rgba(0, 242, 255, 0.5);
+            box-shadow: 0 0 10px #00f2ff;
+            z-index: 10;
+        }
+        .note {
+            position: absolute;
+            width: var(--lane-width);
+            height: 20px;
+            background: linear-gradient(to bottom, #00f2ff, #0072ff);
+            border-radius: 4px;
+            box-shadow: 0 0 8px rgba(0, 242, 255, 0.8);
+        }
+        #ui {
+            position: fixed;
+            left: 20px;
+            top: 20px;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 8px;
+        }
+        #combo-container {
+            position: absolute;
+            top: 40%;
+            width: 100%;
+            text-align: center;
+            font-size: 40px;
+            font-weight: bold;
+            pointer-events: none;
+            text-shadow: 0 0 10px #fff;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <input type="file" id="midi-upload" accept=".mid,.midi"><br><br>
+        <div id="status">MIDI 파일을 올려주세요.</div>
+        <div id="score">Score: 0</div>
+    </div>
+
+    <div id="game-container">
+        <div class="lane" style="left: 0;"><div class="lane-label">S</div></div>
+        <div class="lane" style="left: 60px;"><div class="lane-label">D</div></div>
+        <div class="lane" style="left: 120px;"><div class="lane-label">F</div></div>
+        <div class="lane" style="left: 180px;"><div class="lane-label">J</div></div>
+        <div class="lane" style="left: 240px;"><div class="lane-label">K</div></div>
+        <div class="lane" style="left: 300px;"><div class="lane-label">L</div></div>
+        
+        <div id="judgment-line"></div>
+        <div id="note-layer"></div>
+        <div id="combo-container"></div>
+    </div>
+
+    <script>
+        const LANE_KEYS = ['s', 'd', 'f', 'j', 'k', 'l'];
+        const NOTE_SPEED = 600; // pixels per second
+        const JUDGMENT_POS = window.innerHeight * 0.8;
+        
+        let notes = []; 
+        let score = 0;
+        let combo = 0;
+        let isPlaying = false;
+        let startTime = 0;
+
+        const sampler = new Tone.Sampler({
+            urls: { "C4": "C4.mp3" },
+            baseUrl: "./sound/Emotional/",
+            release: 1
+        }).toDestination();
+
+        document.getElementById('midi-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            document.getElementById('status').innerText = "분석 중...";
+            const arrayBuffer = await file.arrayBuffer();
+            const midi = new Midi(arrayBuffer);
+            
+            parseMidi(midi);
+            document.getElementById('status').innerText = "준비 완료! S,D,F,J,K,L 키를 사용하세요.";
+            await Tone.start();
+            startHold();
+        });
+
+        function parseMidi(midi) {
+            notes = [];
+            const noteLayer = document.getElementById('note-layer');
+            noteLayer.innerHTML = "";
+
+            midi.tracks.forEach(track => {
+                track.notes.forEach(note => {
+                    // MIDI 음높이를 6개 레인으로 매핑 (노트 번호 % 6)
+                    const laneIndex = note.midi % 6;
+                    
+                    const noteObj = {
+                        time: note.time,
+                        lane: laneIndex,
+                        name: note.name,
+                        hit: false,
+                        element: null
+                    };
+
+                    // 시각적 요소 생성
+                    const div = document.createElement('div');
+                    div.className = 'note';
+                    div.style.left = `${laneIndex * 60}px`;
+                    div.style.display = 'none'; // 초기엔 숨김
+                    noteLayer.appendChild(div);
+                    
+                    noteObj.element = div;
+                    notes.push(noteObj);
+                });
+            });
+
+            notes.sort((a, b) => a.time - b.time);
+        }
+
+        function startHold() {
+            isPlaying = true;
+            startTime = performance.now() / 1000;
+            requestAnimationFrame(update);
+        }
+
+        function update(now) {
+            if (!isPlaying) return;
+
+            const currentTime = (now / 1000) - startTime;
+
+            notes.forEach(note => {
+                if (note.hit) return;
+
+                // 노트의 현재 Y 위치 계산 (현재 시간과 노트 시간의 차이 이용)
+                const timeDiff = note.time - currentTime;
+                const yPos = JUDGMENT_POS - (timeDiff * NOTE_SPEED);
+
+                // 화면 범위 내에 있을 때만 렌더링
+                if (yPos > -50 && yPos < window.innerHeight) {
+                    note.element.style.display = 'block';
+                    note.element.style.top = `${yPos}px`;
+                } else if (yPos >= window.innerHeight) {
+                    // 화면 아래로 넘어간 경우 (Miss)
+                    if (!note.hit) {
+                        note.hit = true;
+                        note.element.remove();
+                        resetCombo();
+                    }
+                }
+            });
+
+            requestAnimationFrame(update);
+        }
+
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            const laneIndex = LANE_KEYS.indexOf(key);
+
+            if (laneIndex !== -1) {
+                checkHit(laneIndex);
+            }
+        });
+
+        function checkHit(laneIndex) {
+            const currentTime = (performance.now() / 1000) - startTime;
+            
+            // 현재 레인에서 가장 가까운 노트 찾기
+            const hitMargin = 0.15; // 판정 범위 (초 단위)
+            
+            const targetNote = notes.find(n => 
+                !n.hit && 
+                n.lane === laneIndex && 
+                Math.abs(n.time - currentTime) < hitMargin
+            );
+
+            if (targetNote) {
+                targetNote.hit = true;
+                targetNote.element.remove();
+                sampler.triggerAttackRelease(targetNote.name, "8n");
+                addScore();
+            }
+        }
+
+        function addScore() {
+            score += 100;
+            combo++;
+            document.getElementById('score').innerText = `Score: ${score}`;
+            document.getElementById('combo-container').innerText = `${combo} COMBO`;
+            
+            // 효과 애니메이션
+            const comboText = document.getElementById('combo-container');
+            comboText.style.transform = 'scale(1.2)';
+            setTimeout(() => comboText.style.transform = 'scale(1)', 50);
+        }
+
+        function resetCombo() {
+            combo = 0;
+            document.getElementById('combo-container').innerText = "";
+        }
+    </script>
+</body>
+</html>

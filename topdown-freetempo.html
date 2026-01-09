@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIDI Grid Rhythm Visualizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.8.16"></script>
+    <script src="https://unpkg.com/@tonejs/midi"></script>
+    <style>
+        :root {
+            --primary: #00f2ff;
+            --secondary: #ff00ff;
+            --lane-width: 320px;
+            --judgment-line-pos: 80%;
+        }
+
+        body {
+            background-color: #050505;
+            color: #fff;
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #ui-layer {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid var(--primary);
+        }
+
+        #game-container {
+            position: relative;
+            width: var(--lane-width);
+            height: 100vh;
+            margin: 0 auto;
+            background: linear-gradient(90deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0) 50%, rgba(255,255,255,0.02) 100%);
+            border-left: 1px solid rgba(255, 255, 255, 0.1);
+            border-right: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        #judgment-line {
+            position: absolute;
+            top: var(--judgment-line-pos);
+            width: 100%;
+            height: 4px;
+            background: var(--secondary);
+            box-shadow: 0 0 20px var(--secondary);
+            z-index: 10;
+        }
+
+        #track {
+            position: absolute;
+            width: 100%;
+            bottom: calc(100% - var(--judgment-line-pos));
+            left: 0;
+            transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+            will-change: transform;
+        }
+
+        .chord-block {
+            position: absolute;
+            width: 90%;
+            left: 5%;
+            height: 45px;
+            background: rgba(0, 242, 255, 0.05);
+            border: 2px solid var(--primary);
+            border-radius: 6px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-sizing: border-box;
+        }
+
+        .chord-block.active {
+            background: rgba(0, 242, 255, 0.2);
+            box-shadow: 0 0 25px var(--primary);
+            border-color: #fff;
+            transform: scale(1.05);
+            z-index: 5;
+        }
+
+        .chord-block.passed {
+            opacity: 0;
+            transform: translateY(-20px) scale(0.8);
+            transition: all 0.4s;
+        }
+
+        .count-text {
+            font-size: 22px;
+            font-weight: 900;
+            color: #fff;
+            text-shadow: 0 0 8px rgba(0, 242, 255, 0.8);
+        }
+
+        .key-hint {
+            position: absolute;
+            right: -50px;
+            color: var(--primary);
+            font-size: 11px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui-layer">
+        <input type="file" id="midi-upload" accept=".mid,.midi">
+        <p id="status">MIDI 파일을 선택하세요.</p>
+        <small style="color: #aaa;">아무 키나 눌러 연주 (PC)</small>
+    </div>
+
+    <div id="game-container">
+        <div id="judgment-line"></div>
+        <div id="track"></div>
+    </div>
+
+    <script>
+        // 시각화 설정
+        const PIXELS_PER_SECOND = 450; 
+        const GRID_SIZE = 0.15;        // 0.15초 단위로 노트 묶기 (그리드)
+        const MIN_BLOCK_GAP = 60;      // 블록 간 최소 픽셀 간격
+
+        const sampler = new Tone.Sampler({
+            urls: { "C4": "C4.mp3" },
+            baseUrl: "https://tonejs.github.io/audio/salamander/",
+            release: 1
+        }).toDestination();
+
+        let playbackData = [];
+        let currentIndex = 0;
+        let noteInChordIndex = 0;
+
+        document.getElementById('midi-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            document.getElementById('status').innerText = "파일 분석 중...";
+            const arrayBuffer = await file.arrayBuffer();
+            const midi = new Midi(arrayBuffer);
+            
+            renderMidi(midi);
+            document.getElementById('status').innerText = "준비 완료! 건반을 누르세요.";
+            await Tone.start();
+        });
+
+        function renderMidi(midi) {
+            const track = document.getElementById('track');
+            track.innerHTML = "";
+            currentIndex = 0;
+            noteInChordIndex = 0;
+            playbackData = [];
+
+            // 1. 그리드 기반 노트 그룹화
+            let notesByTime = {};
+            midi.tracks.forEach(t => {
+                t.notes.forEach(note => {
+                    // 시간을 그리드 단위로 반올림하여 겹치는 노트를 하나의 화음으로 인식
+                    const quantizedTime = Math.round(note.time / GRID_SIZE) * GRID_SIZE;
+                    const timeKey = quantizedTime.toFixed(3); 
+                    
+                    if (!notesByTime[timeKey]) notesByTime[timeKey] = [];
+                    notesByTime[timeKey].push(note);
+                });
+            });
+
+            // 2. 시간순 정렬
+            const sortedTimes = Object.keys(notesByTime).sort((a, b) => parseFloat(a) - parseFloat(b));
+            
+            let lastY = -MIN_BLOCK_GAP;
+
+            sortedTimes.forEach((timeStr, index) => {
+                const notes = notesByTime[timeStr];
+                const block = document.createElement('div');
+                block.className = 'chord-block';
+                if (index === 0) block.classList.add('active');
+
+                // 3. Y 좌표 계산 및 겹침 방지
+                let yPos = parseFloat(timeStr) * PIXELS_PER_SECOND;
+                if (yPos - lastY < MIN_BLOCK_GAP) {
+                    yPos = lastY + MIN_BLOCK_GAP; // 최소 간격 유지
+                }
+                lastY = yPos;
+
+                block.style.bottom = `${yPos}px`;
+
+                // 내부 텍스트 (남은 노트 수)
+                const countLabel = document.createElement('div');
+                countLabel.className = 'count-text';
+                countLabel.innerText = notes.length;
+                block.appendChild(countLabel);
+
+                // 우측 음 이름 힌트
+                const hint = document.createElement('div');
+                hint.className = 'key-hint';
+                hint.innerText = notes[0].name.replace(/[0-9]/g, '');
+                block.appendChild(hint);
+
+                track.appendChild(block);
+
+                playbackData.push({
+                    element: block,
+                    notes: notes.map(n => n.name),
+                    y: yPos
+                });
+            });
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (e.repeat || currentIndex >= playbackData.length) return;
+            if (["Alt", "Control", "Shift", "Meta"].includes(e.key)) return;
+
+            const currentChord = playbackData[currentIndex];
+            const noteName = currentChord.notes[noteInChordIndex];
+
+            // 사운드 재생
+            sampler.triggerAttackRelease(noteName, "4n");
+            noteInChordIndex++;
+
+            // UI 업데이트
+            const countLabel = currentChord.element.querySelector('.count-text');
+            const remaining = currentChord.notes.length - noteInChordIndex;
+            countLabel.innerText = remaining > 0 ? remaining : "✓";
+
+            // 화음 완성 시 다음 블록으로
+            if (noteInChordIndex >= currentChord.notes.length) {
+                currentChord.element.classList.replace('active', 'passed');
+
+                currentIndex++;
+                noteInChordIndex = 0;
+
+                if (currentIndex < playbackData.length) {
+                    const nextChord = playbackData[currentIndex];
+                    nextChord.element.classList.add('active');
+
+                    // 트랙 스크롤 이동
+                    const track = document.getElementById('track');
+                    track.style.transform = `translateY(${nextChord.y}px)`;
+                } else {
+                    document.getElementById('status').innerText = "✨ PERFECT! ✨";
+                }
+            }
+        });
+    </script>
+</body>
+
+</html>

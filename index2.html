@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIDI Grouped Visualizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.8.16"></script>
+    <script src="https://unpkg.com/@tonejs/midi"></script>
+    <style>
+        body {
+            background-color: #000;
+            color: #fff;
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        #controls {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            z-index: 100;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 10px;
+            border-radius: 8px;
+        }
+
+        #track-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+
+        #track {
+            position: absolute;
+            left: 100px;
+            top: 0;
+            height: 100%;
+            will-change: transform;
+        }
+
+        /* 동시 노트를 감싸는 사각형 박스 */
+        .chord-group {
+            position: absolute;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            /* 세로 중앙 정렬 */
+            padding: 4px 6px;
+            border: 1.5px solid #00f2ff;
+            background: rgba(0, 242, 255, 0.15);
+            border-radius: 4px;
+            white-space: nowrap;
+            transform: translateY(-50%);
+            transition: all 0.2s;
+            /* 부드러운 변화 */
+        }
+
+        .note-char {
+            font-weight: bold;
+            color: #fff;
+            /* 기본 폰트 크기는 JS에서 동적으로 설정합니다 */
+        }
+    </style>
+</head>
+
+<body>
+    <div id="controls">
+        <input type="file" id="midi-upload" accept=".mid,.midi">
+    </div>
+    <div id="track-container">
+        <div id="track"></div>
+    </div>
+
+    <script>
+        const PIXELS_PER_SECOND = 150; // 가로 간격 (조금 더 넓힘)
+        const NOTE_HEIGHT = 120;       // 행 간 높이
+
+        const midiMap = {
+            "C1": "1", "C#1": "!", "D1": "2", "D#1": "@", "E1": "3", "F1": "4", "F#1": "$", "G1": "5", "G#1": "%", "A1": "6", "A#1": "^", "B1": "7",
+            "C2": "8", "C#2": "*", "D2": "9", "D#2": "(", "E2": "0", "F2": "q", "F#2": "Q", "G2": "w", "G#2": "W", "A2": "e", "A#2": "E", "B2": "r",
+            "C3": "t", "C#3": "T", "D3": "y", "D#3": "Y", "E3": "u", "F3": "i", "F#3": "I", "G3": "o", "G#3": "O", "A3": "p", "A#3": "P", "B3": "a",
+            "C4": "s", "C#4": "S", "D4": "d", "D#4": "D", "E4": "f", "F4": "g", "F#4": "G", "G4": "h", "G#4": "H", "A4": "j", "A#4": "J", "B4": "k",
+            "C5": "l", "C#5": "L", "D5": "z", "D#5": "Z", "E5": "x", "F5": "c", "F#5": "C", "G5": "v", "G#5": "V", "A5": "b", "A#5": "B", "B5": "n",
+            "C6": "m", "C#6": "M"
+        };
+
+        const lines = [
+            "1!2@34$5%6^78*90",
+            "qQwWeErRtTyYuUiIoOpP",
+            "asSdDfGgHhJjklL",
+            "zZxCcVvBbNmM"
+        ];
+
+        const keyLineMap = {};
+        lines.forEach((chars, index) => {
+            const lineNum = index + 1;
+            for (const char of chars) {
+                keyLineMap[char] = lineNum;
+            }
+        });
+
+        document.getElementById('midi-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const arrayBuffer = await file.arrayBuffer();
+            const midi = new Midi(arrayBuffer);
+            renderMidi(midi);
+        });
+
+        function renderMidi(midi) {
+            const track = document.getElementById('track');
+            track.innerHTML = "";
+
+            let allNotes = [];
+            midi.tracks.forEach(t => {
+                t.notes.forEach(note => {
+                    const char = midiMap[note.name];
+                    if (char) {
+                        allNotes.push({ time: note.time, char: char, midi: note.midi });
+                    }
+                });
+            });
+
+            const groups = {};
+            allNotes.forEach(note => {
+                const timeKey = Math.round(note.time * 1000) / 1000;
+                if (!groups[timeKey]) groups[timeKey] = [];
+                groups[timeKey].push(note);
+            });
+
+            Object.keys(groups).sort((a, b) => a - b).forEach(timeKey => {
+                const chordNotes = groups[timeKey];
+                chordNotes.sort((a, b) => a.midi - b.midi);
+
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'chord-group';
+
+                // --- 동적 폰트 및 간격 계산 로직 ---
+                const count = chordNotes.length;
+                let fontSize = 18; // 기본 크기
+                let gap = 10;      // 기본 간격
+
+                if (count > 3) {
+                    fontSize = Math.max(10, 18 - (count * 1.2)); // 최소 10px까지 축소
+                    gap = Math.max(2, 10 - (count * 0.8));       // 최소 2px까지 축소
+                }
+                // ---------------------------------
+
+                groupDiv.style.gap = `${gap}px`;
+                groupDiv.style.left = `${timeKey * PIXELS_PER_SECOND}px`;
+
+                const firstChar = chordNotes[0].char;
+                const lineNum = keyLineMap[firstChar] || 2;
+                groupDiv.style.top = `${lineNum * NOTE_HEIGHT}px`;
+
+                chordNotes.forEach(note => {
+                    const span = document.createElement('span');
+                    span.className = 'note-char';
+                    span.innerText = note.char;
+                    span.style.fontSize = `${fontSize}px`; // 계산된 폰트 크기 적용
+                    groupDiv.appendChild(span);
+                });
+
+                track.appendChild(groupDiv);
+            });
+        }
+    </script>
+</body>
+
+</html>

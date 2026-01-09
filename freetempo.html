@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIDI Sequential Interactive Visualizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.8.16"></script>
+    <script src="https://unpkg.com/@tonejs/midi"></script>
+    <style>
+        body {
+            background-color: #000;
+            color: #fff;
+            margin: 0;
+            overflow-x: hidden;
+            /* 자동 스크롤을 위해 변경 */
+            overflow-y: hidden;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        #controls {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            z-index: 100;
+            background: rgba(255, 255, 255, 0.15);
+            padding: 10px;
+            border-radius: 8px;
+            +backdrop-filter: blur(5px);
+        }
+
+        #track-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #track {
+            position: absolute;
+            left: 100px;
+            /* 시작 위치 여백 */
+            top: 0;
+            height: 100%;
+            transition: transform 0.2s ease-out;
+            /* 부드러운 화면 이동 */
+        }
+
+        .chord-group {
+            position: absolute;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            padding: 4px 8px;
+            border: 1.5px solid #00f2ff;
+            background: rgba(0, 242, 255, 0.1);
+            border-radius: 6px;
+            white-space: nowrap;
+            box-shadow: 0 0 8px rgba(0, 242, 255, 0.2);
+            transition: opacity 0.3s, transform 0.3s;
+        }
+
+        /* 현재 눌러야 할 타겟 강조 */
+        .chord-group.active {
+            border-color: #ff00ff;
+            box-shadow: 0 0 15px #ff00ff;
+            background: rgba(255, 0, 255, 0.2);
+            transform: scale(1.1);
+        }
+
+        .note-char {
+            font-weight: bold;
+            color: #fff;
+            text-shadow: 1px 1px 2px #000;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="controls">
+        <input type="file" id="midi-upload" accept=".mid,.midi">
+        <span id="status">파일을 업로드하세요.</span>
+    </div>
+    <div id="track-container">
+        <div id="track"></div>
+    </div>
+
+    <script>
+        const NOTE_HEIGHT = 80;
+        const MIN_GAP = 30;
+        const PIXELS_PER_SECOND = 100;
+
+        // MIDI 번호를 키보드 문자로 변환 (역방향 맵도 필요함)
+        const midiMap = {
+            "C1": "1", "C#1": "!", "D1": "2", "D#1": "@", "E1": "3", "F1": "4", "F#1": "$", "G1": "5", "G#1": "%", "A1": "6", "A#1": "^", "B1": "7",
+            "C2": "8", "C#2": "*", "D2": "9", "D#2": "(", "E2": "0", "F2": "q", "F#2": "Q", "G2": "w", "G#2": "W", "A2": "e", "A#2": "E", "B2": "r",
+            "C3": "t", "C#3": "T", "D3": "y", "D#3": "Y", "E3": "u", "F3": "i", "F#3": "I", "G3": "o", "G#3": "O", "A3": "p", "A#3": "P", "B3": "a",
+            "C4": "s", "C#4": "S", "D4": "d", "D#4": "D", "E4": "f", "F4": "g", "F#4": "G", "G4": "h", "G#4": "H", "A4": "j", "A#4": "J", "B4": "k",
+            "C5": "l", "C#5": "L", "D5": "z", "D#5": "Z", "E5": "x", "F5": "c", "F#5": "C", "G5": "v", "G#5": "V", "A5": "b", "A#5": "B", "B5": "n",
+            "C6": "m", "C#6": "M"
+        };
+
+        // 문자를 MIDI 주파수로 바꾸기 위한 역방향 맵
+        const charToNote = {};
+        for (const [note, char] of Object.entries(midiMap)) {
+            charToNote[char] = note;
+        }
+
+        const lines = ["1!2@34$5%6^78*90", "qQwWeErRtTyYuUiIoOpP", "asSdDfGgHhJjklL", "zZxCcVvBbNmM"];
+        const keyLineMap = {};
+        lines.forEach((chars, index) => {
+            for (const char of chars) keyLineMap[char] = index + 1;
+        });
+
+        // 사운드 설정 (기본 신시사이저)
+
+
+        let playbackData = []; // 현재 로드된 화음 그룹 데이터
+        let currentIndex = 0;   // 현재 입력 대기 중인 그룹 인덱스
+
+        document.getElementById('midi-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            document.getElementById('status').innerText = "로딩 중...";
+            const arrayBuffer = await file.arrayBuffer();
+            const midi = new Midi(arrayBuffer);
+            renderMidi(midi);
+            document.getElementById('status').innerText = "준비 완료! 키보드를 누르세요.";
+
+            // Audio Context 시작 (사용자 상호작용 필요)
+            await Tone.start();
+        });
+
+        function renderMidi(midi) {
+            const track = document.getElementById('track');
+            track.innerHTML = "";
+            currentIndex = 0;
+            playbackData = [];
+
+            let allNotes = [];
+            midi.tracks.forEach(t => {
+                t.notes.forEach(note => {
+                    const char = midiMap[note.name];
+                    if (char) allNotes.push({ time: note.time, char, midi: note.midi, name: note.name });
+                });
+            });
+
+            const groups = {};
+            allNotes.forEach(note => {
+                const timeKey = Math.round(note.time * 1000) / 1000;
+                if (!groups[timeKey]) groups[timeKey] = [];
+                groups[timeKey].push(note);
+            });
+
+            const sortedTimes = Object.keys(groups).sort((a, b) => a - b);
+            let currentX = 0;
+            let lastTime = 0;
+
+            sortedTimes.forEach((timeKey, index) => {
+                const chordNotes = groups[timeKey].sort((a, b) => a.midi - b.midi);
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'chord-group';
+                if (index === 0) groupDiv.classList.add('active');
+
+                const fontSize = chordNotes.length > 3 ? Math.max(12, 20 - chordNotes.length) : 18;
+                groupDiv.style.gap = `10px`;
+
+                chordNotes.forEach(note => {
+                    const span = document.createElement('span');
+                    span.className = 'note-char';
+                    span.innerText = note.char;
+                    span.style.fontSize = `${fontSize}px`;
+                    groupDiv.appendChild(span);
+                });
+
+                track.appendChild(groupDiv);
+                const groupWidth = groupDiv.offsetWidth;
+                const timeDiff = parseFloat(timeKey) - lastTime;
+                const spacing = Math.max(MIN_GAP, timeDiff * PIXELS_PER_SECOND);
+
+                const posX = currentX + spacing;
+                const posY = (keyLineMap[chordNotes[0].char] || 1) * NOTE_HEIGHT;
+
+                groupDiv.style.left = `${posX}px`;
+                groupDiv.style.top = `${posY}px`;
+
+                // 입력 확인을 위한 데이터 저장
+                playbackData.push({
+                    element: groupDiv,
+                    chars: chordNotes.map(n => n.char),
+                    notes: chordNotes.map(n => n.name),
+                    x: posX
+                });
+
+                currentX += spacing + groupWidth;
+                lastTime = parseFloat(timeKey);
+            });
+        }
+        const emotional = new Tone.Sampler({
+            urls: {
+                "C1": "c1.mp3",
+                "C#1": "cs1.mp3",
+                "D1": "d1.mp3",
+                "D#1": "ds1.mp3",
+                "E1": "e1.mp3",
+                "F1": "e1.mp3",
+                "F#1": "fs1.mp3",
+                "G1": "g1.mp3",
+                "G#1": "gs1.mp3",
+                "A1": "a1.mp3",
+                "A#1": "as1.mp3",
+                "B1": "b1.mp3",
+                "C2": "c2.mp3",
+                "C#2": "cs2.mp3",
+                "D2": "d2.mp3",
+                "D#2": "ds2.mp3",
+                "E2": "e2.mp3",
+                "F2": "f2.mp3",
+                "F#2": "fs2.mp3",
+                "G2": "g2.mp3",
+                "G#2": "gs2.mp3",
+                "A2": "a2.mp3",
+                "A#2": "as2.mp3",
+                "B2": "b2.mp3",
+                "C3": "c3.mp3",
+                "C#3": "cs3.mp3",
+                "D3": "d3.mp3",
+                "D#3": "ds3.mp3",
+                "E3": "e3.mp3",
+                "F3": "f3.mp3",
+                "F#3": "fs3.mp3",
+                "G3": "g3.mp3",
+                "G#3": "gs3.mp3",
+                "A3": "a3.mp3",
+                "A#3": "as3.mp3",
+                "B3": "b3.mp3",
+                "C4": "c4.mp3",
+                "C#4": "cs4.mp3",
+                "D4": "d4.mp3",
+                "D#4": "ds4.mp3",
+                "E4": "e4.mp3",
+                "F4": "f4.mp3",
+                "F#4": "fs4.mp3",
+                "G4": "g4.mp3",
+                "G#4": "gs4.mp3",
+                "A4": "a4.mp3",
+                "A#4": "as4.mp3",
+                "B4": "b4.mp3",
+                "C5": "c5.mp3",
+                "C#5": "cs5.mp3",
+                "D5": "d5.mp3",
+                "D#5": "ds5.mp3",
+                "E5": "e5.mp3",
+                "F5": "f5.mp3",
+                "F#5": "fs5.mp3",
+                "G5": "g5.mp3",
+                "G#5": "gs5.mp3",
+                "A5": "a5.mp3",
+                "A#5": "as5.mp3",
+                "B5": "b5.mp3",
+                "C6": "c6.mp3",
+                "C#6": "cs6.mp3",
+            },
+            volume: -12,
+            baseUrl: "./sound/Emotional/",
+            attack: 0.01,
+            release: 1.5,
+        }).toDestination();
+        // 키보드 입력 이벤트
+        // 현재 화음을 완성하기 위해 사용자가 입력한 키들을 추적
+        // 개별 음을 연주하기 위한 함수
+        function playNote(noteName) {
+            // 0.1초 동안 짧게 재생 (필요에 따라 조절 가능)
+            emotional.triggerAttackRelease(noteName, "8n");
+        }
+
+        // 현재 화음에서 이미 입력 완료된 키들을 추적
+        let currentInputSet = new Set();
+
+        let noteInChordIndex = 0;
+
+        window.addEventListener('keydown', (e) => {
+            if (e.repeat) return; // 꾹 누르기 방지
+
+            // 업로드된 곡이 끝났으면 리턴
+            if (currentIndex >= playbackData.length) return;
+
+            // 기능 키(F1-F12, Alt, Ctrl 등)는 연주에서 제외하고 싶다면 아래 조건 추가
+            if (e.key.length > 1 && e.key !== "Enter" && e.key !== "Space" && e.key !== "Backspace") return;
+
+            const currentChord = playbackData[currentIndex];
+
+            // 1. 현재 화음의 다음 음을 연주
+            const noteName = currentChord.notes[noteInChordIndex];
+            playNote(noteName);
+
+            // 2. 시각적 피드백: 방금 연주된 글자 색 변경
+            const charSpans = currentChord.element.querySelectorAll('.note-char');
+            if (charSpans[noteInChordIndex]) {
+                charSpans[noteInChordIndex].style.color = "#555";
+                charSpans[noteInChordIndex].style.textShadow = "none";
+            }
+
+            // 3. 화음 내 인덱스 증가
+            noteInChordIndex++;
+
+            // 4. 현재 화음의 모든 음을 다 눌렀을 때
+            if (noteInChordIndex >= currentChord.chars.length) {
+                // 현재 그룹 사라지는 효과
+                const targetElement = currentChord.element;
+                targetElement.style.opacity = "0";
+                targetElement.style.transform = "translateY(-30px) scale(1.1)";
+
+                // 다음 화음으로 넘어가기 위한 초기화
+                noteInChordIndex = 0;
+                currentIndex++;
+
+                if (currentIndex < playbackData.length) {
+                    const nextChord = playbackData[currentIndex];
+                    nextChord.element.classList.add('active');
+
+                    // 화면 스크롤 이동
+                    const track = document.getElementById('track');
+                    track.style.transform = `translateX(${-nextChord.x + 100}px)`;
+                } else {
+                    document.getElementById('status').innerText = "연주 완료! 수고하셨습니다.";
+                }
+            }
+        });
+    </script>
+</body>
+
+</html>

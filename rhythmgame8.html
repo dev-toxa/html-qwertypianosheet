@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>8-Key Rhythm Game (L-Shift Focus)</title>
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.8.16"></script>
+    <script src="https://unpkg.com/@tonejs/midi"></script>
+    <style>
+        :root {
+            --lane-width: 60px;
+            --perfect-line: 85%;
+            --beam-color: rgba(0, 242, 255, 0.4);
+            --space-beam-color: rgba(255, 0, 204, 0.4);
+        }
+
+        body {
+            background-color: #050505;
+            color: #fff;
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', sans-serif;
+            display: flex;
+            justify-content: center;
+        }
+
+        #game-container {
+            position: relative;
+            /* 8개 레인 너비 계산 */
+            width: calc(var(--lane-width) * 8 + 10px);
+            height: 100vh;
+            background: #0a0a0a;
+            border-left: 3px solid #333;
+            border-right: 3px solid #333;
+        }
+
+        .lane {
+            position: absolute;
+            top: 0;
+            width: var(--lane-width);
+            height: 100%;
+            border-right: 1px solid rgba(255, 255, 255, 0.05);
+            box-sizing: border-box;
+        }
+
+        .lane.space-lane {
+            background: rgba(255, 255, 255, 0.02);
+            width: calc(var(--lane-width) + 10px);
+        }
+
+        .key-beam {
+            position: absolute;
+            bottom: calc(100% - var(--perfect-line));
+            width: 100%;
+            height: 600px;
+            background: linear-gradient(to top, var(--beam-color), transparent);
+            pointer-events: none;
+            opacity: 0;
+            z-index: 5;
+        }
+
+        .space-lane .key-beam {
+            background: linear-gradient(to top, var(--space-beam-color), transparent);
+        }
+
+        .key-beam.active {
+            animation: beam-fade 0.15s ease-out;
+        }
+
+        @keyframes beam-fade {
+            0% {
+                opacity: 1;
+                transform: scaleX(1.1);
+            }
+
+            100% {
+                opacity: 0;
+                transform: scaleX(1);
+            }
+        }
+
+        .lane-label {
+            position: absolute;
+            bottom: 15px;
+            width: 100%;
+            text-align: center;
+            font-size: 11px;
+            font-weight: bold;
+            color: #555;
+        }
+
+        #judgment-line {
+            position: absolute;
+            top: var(--perfect-line);
+            width: 100%;
+            height: 4px;
+            background: #00f2ff;
+            box-shadow: 0 0 15px #00f2ff;
+            z-index: 10;
+        }
+
+        .note {
+            position: absolute;
+            width: var(--lane-width);
+            height: 18px;
+            background: linear-gradient(to right, #00d2ff, #3a7bd5);
+            border-radius: 2px;
+            z-index: 8;
+        }
+
+        .note.space-note {
+            background: linear-gradient(to right, #ff00cc, #3333ff);
+            width: calc(var(--lane-width) + 10px);
+        }
+
+        #ui {
+            position: fixed;
+            left: 20px;
+            top: 20px;
+            z-index: 100;
+        }
+
+        #combo-container {
+            position: absolute;
+            top: 35%;
+            width: 100%;
+            text-align: center;
+            font-size: 45px;
+            font-weight: 900;
+            pointer-events: none;
+            text-shadow: 0 0 15px rgba(255, 255, 255, 0.3);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="ui">
+        <input type="file" id="midi-upload" accept=".mid,.midi"><br><br>
+        <div id="status">MIDI 파일을 업로드하세요. (L-Shift 사용)</div>
+        <h2 id="score">0</h2>
+    </div>
+
+    <div id="game-container">
+        <div id="lanes-render-target"></div>
+        <div id="judgment-line"></div>
+        <div id="note-layer"></div>
+        <div id="combo-container"></div>
+    </div>
+
+    <script>
+        // 8개 키 설정 (L-Shift 포함)
+        const LANE_KEYS = ['shift', 's', 'd', 'f', ' ', 'j', 'k', 'l'];
+        const LANE_LABELS = ['L-Shift', 'S', 'D', 'F', 'Space', 'J', 'K', 'L'];
+        const NOTE_SPEED = 500;
+        const JUDGMENT_POS = window.innerHeight * 0.85;
+
+        let notes = [];
+        let score = 0;
+        let combo = 0;
+        let isPlaying = false;
+        let startTime = 0;
+        const laneElements = [];
+
+        // 레인 및 키빔 생성
+        const lanesTarget = document.getElementById('lanes-render-target');
+        LANE_LABELS.forEach((label, i) => {
+            const lane = document.createElement('div');
+            lane.className = `lane ${label === 'Space' ? 'space-lane' : ''}`;
+            // Space 레인 이후부터 좌표 보정
+            lane.style.left = `${i * 60 + (i > 4 ? 10 : 0)}px`;
+
+            const beam = document.createElement('div');
+            beam.className = 'key-beam';
+            lane.appendChild(beam);
+
+            const lbl = document.createElement('div');
+            lbl.className = 'lane-label';
+            lbl.innerText = label;
+            lane.appendChild(lbl);
+
+            lanesTarget.appendChild(lane);
+            laneElements.push({ beam: beam });
+        });
+
+        const sampler = new Tone.Sampler({
+            urls: { "C4": "C4.mp3" },
+            baseUrl: "./sound/Emotional/",
+            release: 1
+        }).toDestination();
+
+        document.getElementById('midi-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            document.getElementById('status').innerText = "분석 중...";
+            const arrayBuffer = await file.arrayBuffer();
+            const midi = new Midi(arrayBuffer);
+            parseMidi(midi);
+            document.getElementById('status').innerText = "Playing!";
+            await Tone.start();
+            isPlaying = true;
+            startTime = performance.now() / 1000;
+            requestAnimationFrame(update);
+        });
+
+        function parseMidi(midi) {
+            notes = [];
+            const noteLayer = document.getElementById('note-layer');
+            noteLayer.innerHTML = "";
+            midi.tracks.forEach(track => {
+                track.notes.forEach(note => {
+                    const laneIndex = note.midi % 8; // 8개 레인으로 분산
+                    const div = document.createElement('div');
+                    div.className = `note ${laneIndex === 4 ? 'space-note' : ''}`;
+                    div.style.left = `${laneIndex * 60 + (laneIndex > 4 ? 10 : 0)}px`;
+                    div.style.display = 'none';
+                    noteLayer.appendChild(div);
+                    notes.push({
+                        time: note.time, lane: laneIndex, name: note.name, hit: false, element: div
+                    });
+                });
+            });
+            notes.sort((a, b) => a.time - b.time);
+        }
+
+        function update(now) {
+            if (!isPlaying) return;
+            const currentTime = (now / 1000) - startTime;
+
+            for (let note of notes) {
+                if (note.hit) continue;
+                const timeDiff = note.time - currentTime;
+                const yPos = JUDGMENT_POS - (timeDiff * NOTE_SPEED);
+
+                if (yPos > -50 && yPos < window.innerHeight) {
+                    note.element.style.display = 'block';
+                    note.element.style.top = `${yPos}px`;
+                } else if (yPos >= window.innerHeight) {
+                    note.hit = true;
+                    note.element.style.opacity = '0';
+                    resetCombo();
+                }
+            }
+            requestAnimationFrame(update);
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (!isPlaying || e.repeat) return;
+
+            const key = e.key.toLowerCase();
+
+            // Shift 처리: location이 1(Left)인 경우만 작동
+            if (key === 'shift') {
+                if (e.location === 1) { // Left Shift
+                    triggerBeam(0);
+                    checkHit(0);
+                }
+                return;
+            }
+
+            // 나머지 키 처리
+            const idx = LANE_KEYS.indexOf(key);
+            if (idx !== -1 && idx !== 0) { // 0번(Shift)은 위에서 따로 처리함
+                triggerBeam(idx);
+                checkHit(idx);
+            }
+        });
+
+        function triggerBeam(laneIndex) {
+            const beam = laneElements[laneIndex].beam;
+            beam.classList.remove('active');
+            void beam.offsetWidth;
+            beam.classList.add('active');
+        }
+
+        function checkHit(laneIndex) {
+            const currentTime = (performance.now() / 1000) - startTime;
+            const hitMargin = 0.18;
+            const targetNote = notes.find(n =>
+                !n.hit && n.lane === laneIndex && Math.abs(n.time - currentTime) < hitMargin
+            );
+
+            if (targetNote) {
+                targetNote.hit = true;
+                targetNote.element.style.display = 'none';
+                sampler.triggerAttackRelease(targetNote.name, "8n");
+                score += 100;
+                combo++;
+                document.getElementById('score').innerText = score;
+                document.getElementById('combo-container').innerText = combo > 1 ? `${combo} COMBO` : "";
+            }
+        }
+
+        function resetCombo() {
+            combo = 0;
+            document.getElementById('combo-container').innerText = "";
+        }
+    </script>
+</body>
+
+</html>
