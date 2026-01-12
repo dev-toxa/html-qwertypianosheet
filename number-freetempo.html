@@ -216,7 +216,7 @@
             if (e.key.length > 1 && !["Enter", " ", "Backspace"].includes(e.key)) return;
 
             const currentChord = playbackData[currentIndex];
-            
+
             // 음 연주
             const noteName = currentChord.notes[noteInChordIndex];
             playNote(noteName);
@@ -254,4 +254,5 @@
         });
     </script>
 </body>
+
 </html>
